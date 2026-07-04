@@ -1,16 +1,18 @@
 """
-Grid Search para encontrar os melhores hiperparametros do Random Forest Obliquo.
-Testa diferentes combinacoes de n_trees e max_depth.
+Grid Search completo para encontrar os melhores hiperparametros do Random Forest Obliquo.
+Testa diferentes combinacoes de n_trees, max_depth, projection_method,
+min_samples_split, min_samples_leaf e n_projections.
 """
 import numpy as np
 import time
 from random_forest import RandomForest
 
+# Carregar dados
 data = np.load("data.npz")
 X_train = data["X_train"]
 y_train = data["y_train"]
 
-# Split 80/20 com seed fixa
+# Split 80/20 com seed fixa para avaliacao justa
 rng = np.random.default_rng(42)
 n = len(X_train)
 idx = rng.permutation(n)
@@ -19,30 +21,53 @@ X_tr, y_tr = X_train[idx[:split]], y_train[idx[:split]]
 X_val, y_val = X_train[idx[split:]], y_train[idx[split:]]
 
 print(f"Treino: {X_tr.shape[0]} | Validacao: {X_val.shape[0]}")
-print("=" * 65)
+print("=" * 100)
 
-# Parametros a testar
+# Defina a grade de parametros para testar.
+# Sinta-se livre para adicionar/remover valores para ajustar o tempo de execucao.
 param_grid = {
-    "n_trees": [50, 100, 150, 200],
-    "max_depth": [5, 10, 15, 20, 25],
+    "n_trees": [150, 160, 180],
+    "max_depth": [18, 20, 23],
+    "projection_method": ["lda"],
+    "min_samples_split": [2, 5],
+    "min_samples_leaf": [1, 2],
+    "n_projections": [3, 5],
 }
 
-results = []
+# Gerando as combinacoes
+import itertools
+keys, values = zip(*param_grid.items())
+experiments = [dict(zip(keys, v)) for v in itertools.product(*values)]
 
-total = len(param_grid["n_trees"]) * len(param_grid["max_depth"])
+total = len(experiments)
+print(f"Total de experimentos a rodar: {total}")
+print("Pressione Ctrl+C a qualquer momento para parar. O ranking parcial sera salvo.")
+print("=" * 100)
+
+results = []
 count = 0
 
-for n_trees in param_grid["n_trees"]:
-    for max_depth in param_grid["max_depth"]:
+try:
+    for params in experiments:
         count += 1
-        print(f"[{count}/{total}] n_trees={n_trees}, max_depth={max_depth}", end=" ... ")
+        print(f"[{count}/{total}] "
+              f"n_trees={params['n_trees']}, "
+              f"depth={params['max_depth']}, "
+              f"method={params['projection_method']}, "
+              f"split={params['min_samples_split']}, "
+              f"leaf={params['min_samples_leaf']}, "
+              f"proj={params['n_projections']}", end=" ... ")
 
         t0 = time.time()
         forest = RandomForest(
-            n_trees=n_trees,
-            max_depth=max_depth,
+            n_trees=params["n_trees"],
+            max_depth=params["max_depth"],
             max_features="sqrt",
-            random_state=42,
+            projection_method=params["projection_method"],
+            min_samples_split=params["min_samples_split"],
+            min_samples_leaf=params["min_samples_leaf"],
+            n_projections=params["n_projections"],
+            random_state=42
         )
         forest.fit(X_tr, y_tr)
         t_train = time.time() - t0
@@ -51,23 +76,30 @@ for n_trees in param_grid["n_trees"]:
         acc = np.mean(y_pred == y_val)
 
         print(f"acc={acc:.4f}  tempo={t_train:.1f}s")
+        
         results.append({
-            "n_trees": n_trees,
-            "max_depth": max_depth,
+            "params": params,
             "accuracy": acc,
             "train_time": t_train,
         })
+except KeyboardInterrupt:
+    print("\nExecucao interrompida pelo usuario. Mostrando resultados parciais...")
 
 # Ordenar por acuracia (melhor primeiro)
 results.sort(key=lambda x: x["accuracy"], reverse=True)
 
-print("\n" + "=" * 65)
-print(f"{'Rank':<5} {'n_trees':<10} {'max_depth':<12} {'Acuracia':<12} {'Tempo(s)':<10}")
-print("-" * 65)
-for i, r in enumerate(results):
+print("\n" + "=" * 100)
+print(f"{'Rank':<5} {'Acuracia':<10} {'Tempo(s)':<10} {'Parametros':<70}")
+print("-" * 100)
+for i, r in enumerate(results[:30]):  # Mostrar top 30
     marker = " <-- MELHOR" if i == 0 else ""
-    print(f"{i+1:<5} {r['n_trees']:<10} {r['max_depth']:<12} {r['accuracy']:<12.4f} {r['train_time']:<10.1f}{marker}")
+    p = r["params"]
+    p_str = f"n_trees={p['n_trees']} | depth={p['max_depth']} | method={p['projection_method']} | split={p['min_samples_split']} | leaf={p['min_samples_leaf']} | proj={p['n_projections']}"
+    print(f"{i+1:<5} {r['accuracy']:<10.4f} {r['train_time']:<10.1f} {p_str}{marker}")
 
-best = results[0]
-print(f"\nMelhor configuracao: n_trees={best['n_trees']}, max_depth={best['max_depth']}")
-print(f"Acuracia: {best['accuracy']:.4f} ({best['accuracy']*100:.2f}%)")
+if results:
+    best = results[0]
+    p = best["params"]
+    print(f"\nMelhor configuracao:")
+    print(f"Acuracia: {best['accuracy']:.4f} ({best['accuracy']*100:.2f}%)")
+    print(f"Parametros: {p}")

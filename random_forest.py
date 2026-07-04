@@ -1,11 +1,12 @@
 import numpy as np
+import warnings
 from sklearn.decomposition import PCA
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 import pandas as pd
 
-def split_node(X, y, max_features=None, rng=None):
+def split_node(X, y, max_features=None, rng=None, projection_method="lda", min_samples_leaf=1):
     n_features = X.shape[1]
 
-    # Feature subsampling: seleciona sqrt(m) features aleatórias por nó
     if max_features is not None and max_features < n_features:
         feature_indices = rng.choice(n_features, size=max_features, replace=False)
         feature_indices.sort()
@@ -14,22 +15,36 @@ def split_node(X, y, max_features=None, rng=None):
 
     X_sub = X[:, feature_indices]
 
-    # Normalização local: cada nó normaliza seus dados antes do PCA
     mean = np.mean(X_sub, axis=0)
     std = np.std(X_sub, axis=0)
-    std[std == 0] = 1.0  # Evita divisão por zero em features constantes
+    std[std == 0] = 1.0
     X_norm = (X_sub - mean) / std
 
-    # Se todas as features selecionadas são constantes, não há como separar
     total_var = np.var(X_norm, axis=0).sum()
     if total_var == 0:
         w = np.zeros(len(feature_indices))
         return w, None, np.inf, None, None, -np.inf, mean, std, feature_indices
 
-    pca = PCA(n_components=1)
-    pca.fit(X_norm)
+    use_pca = True
+    if projection_method == "lda" and len(np.unique(y)) >= 2:
+        try:
+            lda = LDA(n_components=1)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                lda.fit(X_norm, y)
+            w = lda.scalings_[:, 0]
+            norm = np.linalg.norm(w)
+            if norm > 0:
+                w = w / norm
+                use_pca = False
+        except Exception:
+            use_pca = True
 
-    w = pca.components_[0]
+    if use_pca:
+        pca = PCA(n_components=1)
+        pca.fit(X_norm)
+        w = pca.components_[0]
+
     z = X_norm @ w 
 
     if np.min(z) == np.max(z):
@@ -40,23 +55,37 @@ def split_node(X, y, max_features=None, rng=None):
     y_sorted = y[idx]
     best_tau = None
     best_gini = np.inf
-    best_gain = np.inf
     best_left_mask = None
     best_right_mask = None
     n = len(y)
 
-    for i in range(n-1):
+    n_classes = int(y.max()) + 1
+
+    # Contadores incrementais de Gini
+    left_counts = np.zeros(n_classes, dtype=int)
+    right_counts = np.bincount(y_sorted, minlength=n_classes).astype(int)
+    n_left = 0
+    n_right = n
+
+    for i in range(n - 1):
+        c = y_sorted[i]
+        left_counts[c] += 1
+        right_counts[c] -= 1
+        n_left += 1
+        n_right -= 1
+
         if z_sorted[i] == z_sorted[i + 1]:
             continue
 
-        tau = (z_sorted[i]+z_sorted[i+1])/2        
-        left = y_sorted[:i + 1]
-        right = y_sorted[i + 1:] 
-        
-        gini_total = (
-            (len(left) / n) * gini(left)
-            + (len(right) / n) * gini(right)
-        )
+        # Respeita min_samples_leaf
+        if n_left < min_samples_leaf or n_right < min_samples_leaf:
+            continue
+
+        tau = (z_sorted[i] + z_sorted[i + 1]) / 2        
+
+        gini_left = 1.0 - np.sum((left_counts / n_left) ** 2)
+        gini_right = 1.0 - np.sum((right_counts / n_right) ** 2)
+        gini_total = (n_left / n) * gini_left + (n_right / n) * gini_right
 
         if gini_total < best_gini:
             best_gini = gini_total
@@ -86,37 +115,46 @@ class Node:
     def __init__(self):
         self.w = None
         self.tau = None
-        self.mean = None            # Média local usada na normalização deste nó
-        self.std = None             # Desvio padrão local usado na normalização deste nó
-        self.feature_indices = None # Índices das features selecionadas neste nó
+        self.mean = None            
+        self.std = None             
+        self.feature_indices = None 
         self.left = None
         self.right = None
         self.prediction = None
+        self.class_proba = None
 
-def build_tree(X, y, depth=0, max_depth=15, max_features=None, rng=None):
+def build_tree(X, y, depth=0, max_depth=20, max_features=None, rng=None,
+               projection_method="lda", min_samples_split=5, min_samples_leaf=2,
+               n_projections=3, n_classes=None):
     node = Node()
 
-    if depth >= max_depth:
-        node.prediction = np.bincount(y).argmax()
+    if n_classes is None:
+        n_classes = int(y.max()) + 1
+
+    counts = np.bincount(y, minlength=n_classes)
+
+    if depth >= max_depth or len(np.unique(y)) == 1 or X.shape[0] < min_samples_split:
+        node.prediction = counts.argmax()
+        node.class_proba = counts / counts.sum()
         return node
 
-    if len(np.unique(y)) == 1:
-        node.prediction = y[0]
-        return node
-    if X.shape[0] == 1:
-        node.prediction = y[0]
+    # Tenta multiplas projecoes e escolhe o melhor split
+    best_result = None
+    best_split_gain = -np.inf
+
+    for _ in range(n_projections):
+        result = split_node(X, y, max_features, rng, projection_method, min_samples_leaf)
+        w, tau, gini_val, left_mask, right_mask, gain, mean, std, feat_idx = result
+        if tau is not None and gain > best_split_gain:
+            best_split_gain = gain
+            best_result = result
+
+    if best_result is None or best_split_gain <= 0.0:
+        node.prediction = counts.argmax()
+        node.class_proba = counts / counts.sum()
         return node
 
-
-    w, tau, gini, best_left_mask, best_right_mask, gain, mean, std, feature_indices = split_node(X, y, max_features, rng)
-    min_gain_threshold = 0.0
-    if gain < min_gain_threshold:
-        node.prediction = np.bincount(y).argmax()
-        return node
-    
-    if tau is None:
-        node.prediction = np.bincount(y).argmax()
-        return node
+    w, tau, _, best_left_mask, best_right_mask, _, mean, std, feature_indices = best_result
 
     X_left = X[best_left_mask]
     y_left = y[best_left_mask]
@@ -126,12 +164,9 @@ def build_tree(X, y, depth=0, max_depth=15, max_features=None, rng=None):
     n_left = X_left.shape[0]
     n_right = X_right.shape[0]
 
-    if n_left == 0 or n_right == 0:
-        node.prediction = np.bincount(y).argmax()
-        return node
-
-    if n_left == n or n_right == n:
-        node.prediction = np.bincount(y).argmax()
+    if n_left == 0 or n_right == 0 or n_left == n or n_right == n:
+        node.prediction = counts.argmax()
+        node.class_proba = counts / counts.sum()
         return node
     
     node.w = w
@@ -139,8 +174,12 @@ def build_tree(X, y, depth=0, max_depth=15, max_features=None, rng=None):
     node.mean = mean
     node.std = std
     node.feature_indices = feature_indices
-    node.left = build_tree(X_left, y_left, depth + 1, max_depth, max_features, rng)
-    node.right = build_tree(X_right, y_right, depth + 1, max_depth, max_features, rng)
+    node.left = build_tree(X_left, y_left, depth + 1, max_depth, max_features, rng,
+                           projection_method, min_samples_split, min_samples_leaf,
+                           n_projections, n_classes)
+    node.right = build_tree(X_right, y_right, depth + 1, max_depth, max_features, rng,
+                            projection_method, min_samples_split, min_samples_leaf,
+                            n_projections, n_classes)
 
     return node
 
@@ -152,7 +191,6 @@ def predict_one(node, x):
     if node.w is None or node.tau is None:
         return node.prediction
 
-    # Seleciona as mesmas features e aplica a mesma normalização do treino
     x_sub = x[node.feature_indices]
     x_norm = (x_sub - node.mean) / node.std
     z = x_norm @ node.w
@@ -161,6 +199,22 @@ def predict_one(node, x):
         return predict_one(node.left, x)
     else:
         return predict_one(node.right, x)
+
+def predict_proba_one(node, x):
+    if node.left is None and node.right is None:
+        return node.class_proba
+
+    if node.w is None or node.tau is None:
+        return node.class_proba
+
+    x_sub = x[node.feature_indices]
+    x_norm = (x_sub - node.mean) / node.std
+    z = x_norm @ node.w
+
+    if z <= node.tau:
+        return predict_proba_one(node.left, x)
+    else:
+        return predict_proba_one(node.right, x)
 
 
 def predict(node, X):
@@ -171,15 +225,23 @@ def predict(node, X):
 
 class RandomForest:
 
-    def __init__(self, n_trees, max_depth=15, max_features="sqrt", random_state=None):
+    def __init__(self, n_trees, max_depth=20, max_features="sqrt",
+                 projection_method="lda", min_samples_split=5,
+                 min_samples_leaf=2, n_projections=3, random_state=None):
         self.n_trees = n_trees
         self.max_depth = max_depth
         self.max_features = max_features
+        self.projection_method = projection_method
+        self.min_samples_split = min_samples_split
+        self.min_samples_leaf = min_samples_leaf
+        self.n_projections = n_projections
         self.random_state = random_state
         self.trees = []
+        self.n_classes_ = None
 
     def fit(self, X, y):
         self.trees = []
+        self.n_classes_ = int(y.max()) + 1
         n_features = X.shape[1]
 
         if self.max_features == "sqrt":
@@ -194,28 +256,31 @@ class RandomForest:
         rng = np.random.default_rng(self.random_state)
 
         for i in range(self.n_trees):
-
             tree_rng = np.random.default_rng(rng.integers(0, 2**31))
             X_boot, y_boot = bootstrap_sample(X, y, tree_rng)
-            tree = build_tree(X_boot, y_boot, max_depth=self.max_depth, max_features=mf, rng=tree_rng)
+            tree = build_tree(X_boot, y_boot, max_depth=self.max_depth,
+                              max_features=mf, rng=tree_rng,
+                              projection_method=self.projection_method,
+                              min_samples_split=self.min_samples_split,
+                              min_samples_leaf=self.min_samples_leaf,
+                              n_projections=self.n_projections,
+                              n_classes=self.n_classes_)
             self.trees.append(tree)
 
     def predict(self, X):
-        all_predictions = []
+        # Soft voting: soma as probabilidades de cada árvore
+        proba = self.predict_proba(X)
+        return np.argmax(proba, axis=1)
+
+    def predict_proba(self, X):
+        all_proba = np.zeros((X.shape[0], self.n_classes_))
 
         for tree in self.trees:
-            pred = predict(tree,X)
-            all_predictions.append(pred) 
+            for i in range(X.shape[0]):
+                all_proba[i] += predict_proba_one(tree, X[i])
 
-        all_predictions = np.array(all_predictions)
-        all_predictions = all_predictions.T
-        predictions = []
-
-        for votes in all_predictions:
-            winner = np.bincount(votes).argmax()
-            predictions.append(winner)
-
-        return np.array(predictions)
+        all_proba /= len(self.trees)
+        return all_proba
 
 def bootstrap_sample(X, y, rng=None):
     if rng is None:
@@ -235,7 +300,16 @@ def main():
     y_train = data["y_train"]
     X_test = data["X_test"]
 
-    forest = RandomForest(n_trees=100, max_depth=20)
+    forest = RandomForest(
+        n_trees=150,
+        max_depth=20,
+        max_features="sqrt",
+        projection_method="lda",
+        min_samples_split=5,
+        min_samples_leaf=2,
+        n_projections=3,
+        random_state=42,
+    )
     forest.fit(X_train, y_train)
     y_pred = forest.predict(X_test)
     ids = np.arange(1, len(y_pred) + 1)

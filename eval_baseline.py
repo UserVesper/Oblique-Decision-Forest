@@ -26,7 +26,16 @@ print("-" * 40)
 
 # Treinar e medir tempo
 t0 = time.time()
-forest = RandomForest(n_trees=100)
+forest = RandomForest(
+    n_trees=150,
+    max_depth=20,
+    max_features="sqrt",
+    projection_method="lda",
+    min_samples_split=5,
+    min_samples_leaf=2,
+    n_projections=3,
+    random_state=42,
+)
 forest.fit(X_tr, y_tr)
 t_train = time.time() - t0
 
