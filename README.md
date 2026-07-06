@@ -63,6 +63,17 @@ Após implementar sua **oRF**, você deve:
 
 ---
 
+## 🏆 Ranking no Kaggle
+
+Este projeto ficou em terceiro lugar dos grupos(excluindo o aluno Bruno de doutorado) dentre 42 trabalhos enviados de alunos da graduação.
+O desempenho obtido na competição do Kaggle e a colocação correspondente podem ser visualizados abaixo:
+
+<p align="center">
+  <img src="assets/ranking_kaggle.png" alt="Ranking no Kaggle" width="700" />
+</p>
+
+---
+
 ## 📝 Estrutura do Relatório (Máx. 2 páginas)
 
 O relatório deve conter os seguintes itens:
